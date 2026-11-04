@@ -1,0 +1,33 @@
+{
+  "name": "skillbridge-ai",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview",
+    "server:dev": "npm --prefix server run dev",
+    "server:seed": "npm --prefix server run seed",
+    "server:test": "npm --prefix server run build && npm --prefix server test",
+    "dev:all": "concurrently -k -n WEB,API -c cyan,magenta \"npm:dev\" \"npm:server:dev\""
+  },
+  "dependencies": {
+    "lucide-react": "^0.468.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-router-dom": "^7.18.5",
+    "sonner": "^1.7.1"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^6.2.1",
+    "autoprefixer": "^10.4.20",
+    "concurrently": "^9.1.0",
+    "postcss": "^8.4.49",
+    "tailwindcss": "^3.4.16",
+    "typescript": "~5.6.2",
+    "vite": "^8.3.5"
+  }
+}
