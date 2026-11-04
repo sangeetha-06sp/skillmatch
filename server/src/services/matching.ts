@@ -1,16 +1,30 @@
-import { IUser } from "../models/User";
-import { ISkill } from "../models/Skill";
+export interface MatchSkill {
+  id: string;
+  title: string;
+  description: string;
+  category: string;
+  tags: string[];
+  location: string;
+}
+
+export interface MatchUser {
+  id: string;
+  name: string;
+  location: string;
+  ratingAverage: number;
+  ratingCount: number;
+}
 
 export interface MatchResult {
-  skill: ISkill;
-  owner: { id: string; name: string; location: string; ratingAverage: number; ratingCount: number };
+  skill: MatchSkill;
+  owner: MatchUser;
   score: number;
   explanation: { factor: string; points: number; reason: string }[];
 }
 
 const words = (value: string) => new Set(value.toLowerCase().split(/[^a-z0-9+#.]+/).filter((word) => word.length > 1));
 
-export function scoreMatch(query: string, skill: Pick<ISkill, "title" | "description" | "category" | "tags" | "location">, user: Pick<IUser, "location" | "ratingAverage">) {
+export function scoreMatch(query: string, skill: Pick<MatchSkill, "title" | "description" | "category" | "tags" | "location">, user: Pick<MatchUser, "location" | "ratingAverage">) {
   const q = words(query);
   const terms = new Set([...words(skill.title), ...words(skill.description), ...words(skill.category), ...skill.tags.map((t) => t.toLowerCase())]);
   const overlap = q.size ? [...q].filter((word) => terms.has(word)).length / q.size : 0;
@@ -25,24 +39,4 @@ export function scoreMatch(query: string, skill: Pick<ISkill, "title" | "descrip
   if (quality) factors.push({ factor: "listing_detail", points: quality, reason: "Detailed skill description" });
   const score = Math.min(100, relevance + (sameLocation ? 15 : 0) + ratingPoints + quality);
   return { score, factors };
-}
-
-export function rankSkillMatches(query: string, listings: (ISkill & { owner: IUser })[], user: IUser): MatchResult[] {
-  return listings
-    .map((skill) => {
-      const { score, factors } = scoreMatch(query, skill, user);
-      return {
-        skill,
-        owner: {
-          id: String(skill.owner._id),
-          name: skill.owner.name,
-          location: skill.owner.location,
-          ratingAverage: skill.owner.ratingAverage,
-          ratingCount: skill.owner.ratingCount,
-        },
-        score,
-        explanation: factors,
-      };
-    })
-    .sort((a, b) => b.score - a.score || a.skill.title.localeCompare(b.skill.title));
 }

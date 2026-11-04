@@ -2,7 +2,7 @@ import cors from "cors";
 import express from "express";
 import rateLimit from "express-rate-limit";
 import helmet from "helmet";
-import mongoose from "mongoose";
+import { isDatabaseReady } from "./config/database";
 import adminRoutes from "./routes/admin";
 import authRoutes from "./routes/auth";
 import disputeRoutes from "./routes/disputes";
@@ -30,12 +30,12 @@ app.use(express.urlencoded({ extended: false, limit: "1mb" }));
 app.use(rateLimit({ windowMs: 15 * 60 * 1000, limit: 300, standardHeaders: "draft-7", legacyHeaders: false }));
 
 app.get("/api/health", (_req, res) => {
-  const ready = mongoose.connection.readyState === 1;
-  res.status(ready ? 200 : 503).json({ status: ready ? "ok" : "database_unavailable", database: mongoose.connection.readyState });
+  const ready = isDatabaseReady();
+  res.status(ready ? 200 : 503).json({ status: ready ? "ok" : "database_unavailable", database: ready ? "connected" : "disconnected" });
 });
 
 app.use("/api", (_req, _res, next) => {
-  if (mongoose.connection.readyState !== 1) {
+  if (!isDatabaseReady()) {
     next(new AppError(503, "Database is not ready", "DATABASE_UNAVAILABLE"));
     return;
   }

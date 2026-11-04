@@ -1,12 +1,12 @@
 import { Router } from "express";
 import { z } from "zod";
-import { Skill } from "../models/Skill";
-import { User } from "../models/User";
+import { supabase } from "../config/database";
 import { authenticate, requireAuth } from "../middleware/authenticate";
 import { validateBody } from "../middleware/validate";
+import { apiSkill, fetchUsers, throwDatabaseError, type DbRow } from "../services/database";
 import { asyncHandler } from "../utils/asyncHandler";
 import { forbidden, notFound } from "../utils/errors";
-import { paginationFrom, pageInfo } from "../utils/pagination";
+import { pageInfo, paginationFrom } from "../utils/pagination";
 
 const router = Router();
 const skillSchema = z.object({
@@ -21,69 +21,85 @@ const skillSchema = z.object({
   availability: z.enum(["Flexible", "Weekday evenings", "Weekends"]).optional(),
   credits: z.number().int().min(1).max(100).optional(),
 });
+const fields = {
+  title: "title", description: "description", category: "category", tags: "tags", level: "level",
+  type: "type", mode: "mode", location: "location", availability: "availability", credits: "credits",
+};
 
 router.get("/", asyncHandler(async (req, res) => {
   const { page, limit, skip } = paginationFrom(req);
-  const filter: Record<string, unknown> = { active: true };
-  if (typeof req.query.category === "string") filter.category = new RegExp(`^${req.query.category.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, "i");
-  if (["offer", "request"].includes(String(req.query.type))) filter.type = req.query.type;
-  if (["online", "in-person", "either"].includes(String(req.query.mode))) filter.mode = req.query.mode;
-  if (["beginner", "intermediate", "advanced", "expert"].includes(String(req.query.level))) filter.level = req.query.level;
-  if (["Flexible", "Weekday evenings", "Weekends"].includes(String(req.query.availability))) filter.availability = req.query.availability;
-  const query = typeof req.query.q === "string" ? req.query.q.trim().slice(0, 100) : "";
-  if (query) {
-    const terms = query.split(/\s+/).slice(0, 8).map((term) => new RegExp(term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i"));
-    filter.$and = terms.map((term) => ({ $or: [{ title: term }, { description: term }, { category: term }, { tags: term }] }));
-  }
-  const [skills, total] = await Promise.all([
-    Skill.find(filter).populate("owner", "name location college avatarUrl ratingAverage ratingCount").sort({ createdAt: -1 }).skip(skip).limit(limit),
-    Skill.countDocuments(filter),
-  ]);
-  res.json({ skills, pagination: pageInfo(total, page, limit) });
+  let query = supabase.from("skills").select("*", { count: "exact" }).eq("active", true);
+  if (typeof req.query.category === "string" && req.query.category.trim()) query = query.ilike("category", req.query.category.trim());
+  if (["offer", "request"].includes(String(req.query.type))) query = query.eq("type", String(req.query.type));
+  if (["online", "in-person", "either"].includes(String(req.query.mode))) query = query.eq("mode", String(req.query.mode));
+  if (["beginner", "intermediate", "advanced", "expert"].includes(String(req.query.level))) query = query.eq("level", String(req.query.level));
+  if (["Flexible", "Weekday evenings", "Weekends"].includes(String(req.query.availability))) query = query.eq("availability", String(req.query.availability));
+  const search = typeof req.query.q === "string" ? req.query.q.trim().slice(0, 100) : "";
+  if (search) query = query.textSearch("search_document", search, { type: "websearch", config: "simple" });
+  const { data, error, count } = await query.order("created_at", { ascending: false }).range(skip, skip + limit - 1);
+  if (error) throwDatabaseError(error);
+  const skills = (data ?? []) as DbRow[];
+  const owners = await fetchUsers(skills.map((skill) => String(skill.owner_id)));
+  res.json({ skills: skills.map((skill) => apiSkill(skill, owners.get(String(skill.owner_id)))), pagination: pageInfo(count ?? 0, page, limit) });
 }));
 
 router.get("/mine", authenticate, asyncHandler(async (req, res) => {
-  const skills = await Skill.find({ owner: requireAuth(req)._id }).sort({ createdAt: -1 });
-  res.json({ skills });
+  const { data, error } = await supabase.from("skills").select("*").eq("owner_id", requireAuth(req).id).order("created_at", { ascending: false });
+  if (error) throwDatabaseError(error);
+  res.json({ skills: (data ?? []).map((skill) => apiSkill(skill as DbRow)) });
 }));
 
 router.post("/", authenticate, validateBody(skillSchema), asyncHandler(async (req, res) => {
   const user = requireAuth(req);
-  const skill = await Skill.create({ ...req.body, location: req.body.location ?? user.location, owner: user._id });
-  const field = skill.type === "offer" ? "skillsOffered" : "skillsWanted";
-  await User.updateOne({ _id: user._id }, { $addToSet: { [field]: skill._id } });
-  res.status(201).json({ skill });
+  const body = req.body as z.infer<typeof skillSchema>;
+  const { data, error } = await supabase.from("skills").insert({
+    owner_id: user.id,
+    title: body.title,
+    description: body.description,
+    category: body.category,
+    tags: body.tags?.map((tag) => tag.toLowerCase()) ?? [],
+    level: body.level ?? "intermediate",
+    type: body.type ?? "offer",
+    mode: body.mode ?? "either",
+    location: body.location ?? user.location,
+    availability: body.availability ?? "Flexible",
+    credits: body.credits ?? 2,
+  }).select("*").single();
+  if (error) throwDatabaseError(error);
+  res.status(201).json({ skill: apiSkill(data as DbRow, user as unknown as DbRow) });
 }));
 
 router.get("/:id", asyncHandler(async (req, res) => {
-  const skill = await Skill.findOne({ _id: req.params.id, active: true }).populate("owner", "name bio location college avatarUrl ratingAverage ratingCount");
-  if (!skill) throw notFound("Skill listing not found");
-  res.json({ skill });
+  const { data, error } = await supabase.from("skills").select("*").eq("id", req.params.id).eq("active", true).maybeSingle();
+  if (error) throwDatabaseError(error);
+  if (!data) throw notFound("Skill listing not found");
+  const owners = await fetchUsers([String(data.owner_id)]);
+  res.json({ skill: apiSkill(data as DbRow, owners.get(String(data.owner_id))) });
 }));
 
 router.patch("/:id", authenticate, validateBody(skillSchema.partial().strict()), asyncHandler(async (req, res) => {
-  const skill = await Skill.findById(req.params.id);
-  if (!skill) throw notFound("Skill listing not found");
-  if (!skill.owner.equals(requireAuth(req)._id) && requireAuth(req).role !== "admin") throw forbidden();
-  const previousType = skill.type;
-  Object.assign(skill, req.body);
-  await skill.save();
-  if (previousType !== skill.type) {
-    const oldField = previousType === "offer" ? "skillsOffered" : "skillsWanted";
-    const newField = skill.type === "offer" ? "skillsOffered" : "skillsWanted";
-    await User.updateOne({ _id: skill.owner }, { $pull: { [oldField]: skill._id }, $addToSet: { [newField]: skill._id } });
-  }
-  res.json({ skill });
+  const user = requireAuth(req);
+  const { data: existing, error: existingError } = await supabase.from("skills").select("*").eq("id", req.params.id).maybeSingle();
+  if (existingError) throwDatabaseError(existingError);
+  if (!existing) throw notFound("Skill listing not found");
+  if (existing.owner_id !== user.id && user.role !== "admin") throw forbidden();
+  const update = Object.fromEntries(Object.entries(req.body).map(([field, value]) => [
+    fields[field as keyof typeof fields],
+    field === "tags" && Array.isArray(value) ? value.map((tag: string) => tag.toLowerCase()) : value,
+  ]));
+  const { data, error } = await supabase.from("skills").update(update).eq("id", req.params.id).select("*").single();
+  if (error) throwDatabaseError(error);
+  res.json({ skill: apiSkill(data as DbRow) });
 }));
 
 router.delete("/:id", authenticate, asyncHandler(async (req, res) => {
-  const skill = await Skill.findById(req.params.id);
-  if (!skill) throw notFound("Skill listing not found");
-  if (!skill.owner.equals(requireAuth(req)._id) && requireAuth(req).role !== "admin") throw forbidden();
-  skill.active = false;
-  await skill.save();
-  const field = skill.type === "offer" ? "skillsOffered" : "skillsWanted";
-  await User.updateOne({ _id: skill.owner }, { $pull: { [field]: skill._id } });
+  const user = requireAuth(req);
+  const { data: existing, error: existingError } = await supabase.from("skills").select("id, owner_id").eq("id", req.params.id).maybeSingle();
+  if (existingError) throwDatabaseError(existingError);
+  if (!existing) throw notFound("Skill listing not found");
+  if (existing.owner_id !== user.id && user.role !== "admin") throw forbidden();
+  const { error } = await supabase.from("skills").update({ active: false }).eq("id", req.params.id);
+  if (error) throwDatabaseError(error);
   res.json({ message: "Skill listing deactivated" });
 }));
 

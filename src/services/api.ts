@@ -18,6 +18,7 @@ export type ApiUser = {
 
 export type ApiSkill = {
   _id: string;
+  ownerId?: string;
   title: string;
   description: string;
   category: string;
@@ -40,17 +41,19 @@ export type ApiRequest = {
   requester: string | Pick<ApiUser, "_id" | "name">;
   recipient: string | Pick<ApiUser, "_id" | "name">;
   skill: string | { _id: string; title: string };
+  skillId?: string;
 };
 
 export type ApiSession = {
   _id: string;
+  requestId?: string;
   status: "scheduled" | "in_progress" | "completed" | "disputed" | "cancelled";
   scheduledAt: string;
   durationMinutes: number;
   paymentAmount?: number;
   meetingUrl?: string;
   participants: (string | Pick<ApiUser, "_id" | "name">)[];
-  request: string | { skill?: string | { title: string }; requester?: string; recipient?: string };
+  request: string | { _id?: string; skill?: string | { title: string }; requester?: string; recipient?: string };
 };
 
 export type ApiMatch = {

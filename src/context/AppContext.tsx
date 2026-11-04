@@ -4,6 +4,7 @@ import { apiConfigured, apiDelete, apiGet, apiPatch, apiPost, clearApiToken, get
 
 export type Skill = {
   id: string;
+  ownerId?: string;
   title: string;
   category: string;
   level: string;
@@ -33,8 +34,8 @@ export type Student = {
   skillsWanted: string[];
 };
 
-export type ExchangeRequest = { id: string; skill: string; person: string; direction: "incoming" | "outgoing"; status: "Pending" | "Accepted" | "Declined" | "Cancelled" | "Completed"; date: string };
-export type LearningSession = { id: string; title: string; person: string; date: string; time: string; duration: string; credits: number; status: "Upcoming" | "Awaiting confirmation" | "Completed" | "Disputed" | "Cancelled"; meetingLink?: string };
+export type ExchangeRequest = { id: string; skill: string; skillId?: string; person: string; direction: "incoming" | "outgoing"; status: "Pending" | "Accepted" | "Declined" | "Cancelled" | "Completed"; date: string };
+export type LearningSession = { id: string; requestId?: string; title: string; person: string; date: string; time: string; duration: string; credits: number; status: "Upcoming" | "Awaiting confirmation" | "Completed" | "Disputed" | "Cancelled"; meetingLink?: string };
 export type SkillMatch = { skill: Skill; score: number; reason: string };
 export type Activity = { id: string; title: string; detail: string; date: string; tone: "violet" | "cyan" | "pink"; read?: boolean; category?: string };
 export type WalletEntry = { id: string; title: string; detail: string; amount: number; date: string; direction: "earned" | "spent" };
@@ -99,6 +100,7 @@ function mapApiSkill(skill: ApiSkill, currentUser?: ApiUser): Skill {
   const owner = typeof skill.owner === "string" ? currentUser ?? null : skill.owner;
   return {
     id: skill._id,
+    ownerId: skill.ownerId ?? (owner && "_id" in owner ? String(owner._id) : undefined),
     title: skill.title,
     category: skill.category,
     level: skill.level.charAt(0).toUpperCase() + skill.level.slice(1),
@@ -125,7 +127,7 @@ function mapApiRequest(request: ApiRequest, currentUser: ApiUser): ExchangeReque
     ? typeof request.requester === "string" ? "SkillBridge student" : request.requester.name
     : typeof request.recipient === "string" ? "SkillBridge student" : request.recipient.name;
   const status = ({ pending: "Pending", accepted: "Accepted", rejected: "Declined", cancelled: "Cancelled", completed: "Completed" } as const)[request.status];
-  return { id: request._id, skill: typeof request.skill === "string" ? "Skill session" : request.skill.title, person, direction: incoming ? "incoming" : "outgoing", status, date: new Date(request.createdAt).toLocaleDateString("en-US", { month: "short", day: "numeric" }) };
+  return { id: request._id, skill: typeof request.skill === "string" ? "Skill session" : request.skill.title, skillId: request.skillId ?? (typeof request.skill === "string" ? undefined : request.skill._id), person, direction: incoming ? "incoming" : "outgoing", status, date: new Date(request.createdAt).toLocaleDateString("en-US", { month: "short", day: "numeric" }) };
 }
 
 function mapApiSession(session: ApiSession, currentUser: ApiUser, skills: Skill[]): LearningSession {
@@ -137,6 +139,7 @@ function mapApiSession(session: ApiSession, currentUser: ApiUser, skills: Skill[
   const status = ({ scheduled: "Upcoming", in_progress: "Awaiting confirmation", completed: "Completed", disputed: "Disputed", cancelled: "Cancelled" } as const)[session.status];
   return {
     id: session._id,
+    requestId: session.requestId ?? (typeof session.request === "string" ? undefined : session.request._id),
     title: skillTitle ?? "Skill exchange",
     person: peer && typeof peer !== "string" ? peer.name : "Your learning partner",
     date: when.toLocaleDateString("en-US", { month: "short", day: "numeric" }),
@@ -474,16 +477,16 @@ export function AppProvider({ children }: { children: ReactNode }) {
       const response = await apiPost<{ request: ApiRequest }>("/requests", { skillId: skill.id });
       setData((current) => ({
         ...current,
-        requests: [{ id: response.request._id, skill: skill.title, person: skill.owner, direction: "outgoing", status: "Pending", date: "Just now" }, ...current.requests],
+        requests: [{ id: response.request._id, skill: skill.title, skillId: skill.id, person: skill.owner, direction: "outgoing", status: "Pending", date: "Just now" }, ...current.requests],
         activities: [{ id: `a${Date.now()}`, title: "Request sent", detail: `You reached out to ${skill.owner}.`, date: "Just now", tone: "cyan" }, ...current.activities],
       }));
       return;
     }
     setData((current) => {
-      if (current.requests.some((request) => request.skill === skill.title && request.status === "Pending")) return current;
+      if (current.requests.some((request) => (request.skillId ? request.skillId === skill.id : request.skill === skill.title) && request.status === "Pending")) return current;
       return {
         ...current,
-        requests: [{ id: `r${Date.now()}`, skill: skill.title, person: skill.owner, direction: "outgoing", status: "Pending", date: "Just now" }, ...current.requests],
+        requests: [{ id: `r${Date.now()}`, skill: skill.title, skillId: skill.id, person: skill.owner, direction: "outgoing", status: "Pending", date: "Just now" }, ...current.requests],
         activities: [{ id: `a${Date.now()}`, title: "Request sent", detail: `You reached out to ${skill.owner}.`, date: "Just now", tone: "cyan" }, ...current.activities],
       };
     });
@@ -505,7 +508,13 @@ export function AppProvider({ children }: { children: ReactNode }) {
       const response = await apiPost<{ session: ApiSession }>(`/sessions/${encodeURIComponent(id)}/confirm-completion`, {});
       if (response.session.status === "completed") {
         const wallet = await apiGet<{ balance: number; transactions: ApiTransaction[] }>("/wallet?limit=100");
-        setData((current) => ({ ...current, credits: wallet.balance, transactions: wallet.transactions.map(mapApiTransaction), sessions: current.sessions.map((session) => session.id === id ? { ...session, status: "Completed" } : session) }));
+        setData((current) => ({
+          ...current,
+          credits: wallet.balance,
+          transactions: wallet.transactions.map(mapApiTransaction),
+          sessions: current.sessions.map((session) => session.id === id ? { ...session, status: "Completed" } : session),
+          requests: current.requests.map((request) => request.id === response.session.requestId ? { ...request, status: "Completed" } : request),
+        }));
       } else {
         setData((current) => ({ ...current, sessions: current.sessions.map((session) => session.id === id ? { ...session, status: "Awaiting confirmation" } : session) }));
       }
@@ -538,8 +547,14 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const cancelSession = useCallback(async (id: string) => {
     const token = getApiToken();
     if (apiConfigured && !token) throw new Error("Please sign in again before cancelling a session.");
-    if (token) await apiPost<{ session: ApiSession }>(`/sessions/${encodeURIComponent(id)}/cancel`, {});
-    setData((current) => ({ ...current, sessions: current.sessions.map((session) => session.id === id ? { ...session, status: "Cancelled" } : session) }));
+    const response = token ? await apiPost<{ session: ApiSession }>(`/sessions/${encodeURIComponent(id)}/cancel`, {}) : undefined;
+    setData((current) => ({
+      ...current,
+      sessions: current.sessions.map((session) => session.id === id ? { ...session, status: "Cancelled" } : session),
+      requests: response?.session.requestId
+        ? current.requests.map((request) => request.id === response.session.requestId ? { ...request, status: "Cancelled" } : request)
+        : current.requests,
+    }));
   }, []);
   const reportSession = useCallback(async (id: string, reason: string) => {
     const token = getApiToken();

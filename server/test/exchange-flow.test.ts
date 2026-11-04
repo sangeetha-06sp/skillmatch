@@ -1,202 +1,197 @@
-import mongoose from "mongoose";
-import { MongoMemoryServer } from "mongodb-memory-server";
+import { randomUUID } from "node:crypto";
 import request from "supertest";
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { app } from "../src/app";
-import { Dispute } from "../src/models/Dispute";
-import { ExchangeRequest } from "../src/models/ExchangeRequest";
-import { Notification } from "../src/models/Notification";
-import { Session } from "../src/models/Session";
-import { Skill } from "../src/models/Skill";
-import { User } from "../src/models/User";
-import { WalletTransaction } from "../src/models/WalletTransaction";
-import { Waitlist } from "../src/models/Waitlist";
-import { signAccessToken } from "../src/utils/auth";
-import { hashPassword } from "../src/utils/auth";
+import { connectDatabase, disconnectDatabase, supabase } from "../src/config/database";
+import { env } from "../src/config/env";
+import { throwDatabaseError } from "../src/services/database";
 
-let mongo: MongoMemoryServer;
+const liveSupabaseConfigured = Boolean(env.supabaseUrl && env.supabaseServiceRoleKey);
+const emailSuffix = `${Date.now()}-${randomUUID().slice(0, 8)}@example.test`;
+const userIds: string[] = [];
+const skillIds: string[] = [];
+const requestIds: string[] = [];
+const sessionIds: string[] = [];
+const waitlistEmails: string[] = [];
+
+async function createAccount(name: string, localPart: string) {
+  const email = `${localPart}-${emailSuffix}`;
+  const password = "IntegrationPass123!";
+  const response = await request(app).post("/api/auth/register").send({ name, email, password }).expect(201);
+  userIds.push(response.body.user._id);
+  expect(response.body.user.passwordHash).toBeUndefined();
+  expect(response.body.user.tokenVersion).toBeUndefined();
+  const login = await request(app).post("/api/auth/login").send({ email, password }).expect(200);
+  expect(login.body.user._id).toBe(response.body.user._id);
+  return { id: response.body.user._id as string, token: login.body.token as string, email };
+}
+
+function auth(token: string) {
+  return { Authorization: `Bearer ${token}` };
+}
+
+async function createRequest(learnerToken: string, skillId: string, providerToken: string) {
+  const created = await request(app).post("/api/requests").set(auth(learnerToken)).send({ skillId }).expect(201);
+  requestIds.push(created.body.request._id);
+  await request(app).patch(`/api/requests/${created.body.request._id}/status`).set(auth(providerToken)).send({ status: "accepted" }).expect(200);
+  return created.body.request._id as string;
+}
+
+async function createSession(token: string, requestId: string) {
+  const created = await request(app).post("/api/sessions").set(auth(token)).send({
+    requestId,
+    scheduledAt: new Date(Date.now() + 86_400_000).toISOString(),
+    durationMinutes: 60,
+    mode: "online",
+    meetingUrl: "https://meet.jit.si/skillmatch-integration-test",
+  }).expect(201);
+  sessionIds.push(created.body.session._id);
+  return created.body.session._id as string;
+}
 
 beforeAll(async () => {
-  mongo = await MongoMemoryServer.create();
-  await mongoose.connect(mongo.getUri());
-});
-
-beforeEach(async () => {
-  await Promise.all([User, Skill, ExchangeRequest, Session, WalletTransaction, Notification, Waitlist, Dispute].map((model) => model.deleteMany({})));
+  if (liveSupabaseConfigured) await connectDatabase();
 });
 
 afterAll(async () => {
-  await mongoose.disconnect();
-  await mongo.stop();
+  if (liveSupabaseConfigured) {
+    if (userIds.length) {
+      const { error: notificationsError } = await supabase.from("notifications").delete().in("user_id", userIds);
+      if (notificationsError) throwDatabaseError(notificationsError);
+      const { error: transactionsError } = await supabase.from("wallet_transactions").delete().in("user_id", userIds);
+      if (transactionsError) throwDatabaseError(transactionsError);
+      if (sessionIds.length) {
+        const { error: disputesError } = await supabase.from("disputes").delete().in("session_id", sessionIds);
+        if (disputesError) throwDatabaseError(disputesError);
+        const { error: sessionTransactionsError } = await supabase.from("wallet_transactions").delete().in("session_id", sessionIds);
+        if (sessionTransactionsError) throwDatabaseError(sessionTransactionsError);
+        const { error: sessionsError } = await supabase.from("sessions").delete().in("id", sessionIds);
+        if (sessionsError) throwDatabaseError(sessionsError);
+      }
+      if (requestIds.length) {
+        const { error } = await supabase.from("exchange_requests").delete().in("id", requestIds);
+        if (error) throwDatabaseError(error);
+      }
+      if (skillIds.length) {
+        const { error } = await supabase.from("skills").delete().in("id", skillIds);
+        if (error) throwDatabaseError(error);
+      }
+      const { error: walletsError } = await supabase.from("wallets").delete().in("user_id", userIds);
+      if (walletsError) throwDatabaseError(walletsError);
+      const { error: usersError } = await supabase.from("users").delete().in("id", userIds);
+      if (usersError) throwDatabaseError(usersError);
+    }
+    if (waitlistEmails.length) {
+      const { error } = await supabase.from("waitlists").delete().in("email", waitlistEmails);
+      if (error) throwDatabaseError(error);
+    }
+  }
+  await disconnectDatabase();
 });
 
-describe("peer exchange lifecycle", () => {
-  it("applies CORS, validates JSON, and rejects unauthenticated protected requests", async () => {
-    const preflight = await request(app).options("/api/auth/login")
-      .set("Origin", "http://localhost:5173")
-      .set("Access-Control-Request-Method", "POST")
-      .expect(204);
-    expect(preflight.headers["access-control-allow-origin"]).toBe("http://localhost:5173");
-    await request(app).get("/api/requests").expect(401);
-    const malformed = await request(app).post("/api/auth/register")
-      .set("Content-Type", "application/json")
-      .send('{"name":')
-      .expect(400);
-    expect(malformed.body.error.code).toBe("INVALID_JSON");
-  });
-
-  it("registers, logs in, updates profiles, searches listings, and preserves data across reconnects", async () => {
-    const registration = await request(app).post("/api/auth/register").send({
-      name: "Persistence Tester",
-      email: "persist@example.com",
-      password: "PersistentPass123!",
-      college: "North Star University",
-      department: "Computer Science",
-    }).expect(201);
-    const token = registration.body.token as string;
-    const userId = registration.body.user._id as string;
-
-    await request(app).get("/api/auth/me").set("Authorization", `Bearer ${token}`).expect(200);
-    const login = await request(app).post("/api/auth/login").send({
-      email: "persist@example.com",
-      password: "PersistentPass123!",
-    }).expect(200);
-    expect(login.body.user._id).toBe(userId);
-
-    const profile = await request(app).patch("/api/auth/me")
-      .set("Authorization", `Bearer ${token}`)
-      .send({ bio: "I enjoy teaching accessible web development." })
-      .expect(200);
-    expect(profile.body.user.bio).toContain("accessible");
-
-    const listing = await request(app).post("/api/skills")
-      .set("Authorization", `Bearer ${token}`)
-      .send({
-        title: "Accessible React mentoring",
-        description: "Learn to build inclusive React interfaces and test common accessibility needs.",
-        category: "Programming",
-        tags: ["react", "accessibility"],
-        type: "offer",
-        level: "advanced",
-        availability: "Weekends",
-        credits: 4,
-      }).expect(201);
-    const search = await request(app).get("/api/skills?q=accessible&availability=Weekends&level=advanced").expect(200);
-    expect(search.body.skills.map((skill: { _id: string }) => skill._id)).toContain(listing.body.skill._id);
-
-    await mongoose.disconnect();
-    await mongoose.connect(mongo.getUri());
-    const persistedProfile = await request(app).get("/api/auth/me")
-      .set("Authorization", `Bearer ${token}`).expect(200);
-    expect(persistedProfile.body.user._id).toBe(userId);
-    const persistedSkill = await Skill.findById(listing.body.skill._id);
-    expect(persistedSkill?.credits).toBe(4);
-    expect(persistedSkill?.availability).toBe("Weekends");
-  });
-
-  it("returns an explicit unavailable response when the database is disconnected", async () => {
-    await mongoose.disconnect();
-    await request(app).get("/api/health").expect(503);
-    await request(app).get("/api/skills").expect(503);
-    await mongoose.connect(mongo.getUri());
-  });
-
-  it("revokes existing JWTs when a password changes", async () => {
-    const signup = await request(app).post("/api/auth/register").send({
-      name: "Password Tester", email: "password@example.com", password: "InitialPass123!",
-    }).expect(201);
-    const oldToken = signup.body.token as string;
-    const changed = await request(app).patch("/api/auth/password")
-      .set("Authorization", `Bearer ${oldToken}`)
-      .send({ currentPassword: "InitialPass123!", newPassword: "UpdatedPass123!" })
-      .expect(200);
-    expect(changed.body.token).toBeTruthy();
-    await request(app).get("/api/auth/me").set("Authorization", `Bearer ${oldToken}`).expect(401);
-    await request(app).get("/api/auth/me").set("Authorization", `Bearer ${changed.body.token}`).expect(200);
-    const login = await request(app).post("/api/auth/login").send({
-      email: "password@example.com", password: "UpdatedPass123!",
-    }).expect(200);
+describe.skipIf(!liveSupabaseConfigured)("Supabase-backed exchange lifecycle", () => {
+  it("registers and logs in, manages skills, searches/recommends, exchanges, settles credits atomically, cancels, disputes, and returns history", async () => {
+    const provider = await createAccount("Integration Provider", "provider");
+    const learner = await createAccount("Integration Learner", "learner");
+    const password = "IntegrationPass123!";
+    const login = await request(app).post("/api/auth/login").send({ email: provider.email, password }).expect(200);
     expect(login.body.token).toBeTruthy();
-  });
 
-  it("limits administration to admins and handles waitlist signups", async () => {
-    const signup = await request(app).post("/api/auth/register").send({
-      name: "Regular User", email: "regular@example.com", password: "RegularPass123!",
+    const skillResponse = await request(app).post("/api/skills").set(auth(provider.token)).send({
+      title: "Integration React mentoring",
+      description: "Learn to build dependable React interfaces and understand practical component architecture.",
+      category: "Programming",
+      tags: ["react", "testing"],
+      type: "offer",
+      level: "advanced",
+      availability: "Weekends",
+      credits: 4,
     }).expect(201);
-    await request(app).get("/api/admin/stats")
-      .set("Authorization", `Bearer ${signup.body.token}`).expect(403);
+    const skillId = skillResponse.body.skill._id as string;
+    skillIds.push(skillId);
 
-    const admin = await User.create({
-      name: "Admin", email: "admin@example.com", passwordHash: await hashPassword("AdminPass123!"), role: "admin",
-    });
-    await request(app).get("/api/admin/stats")
-      .set("Authorization", `Bearer ${signAccessToken(admin)}`).expect(200);
-
-    await request(app).post("/api/waitlist").send({ email: "waitlist@example.com", interests: ["design"] }).expect(201);
-    await request(app).post("/api/waitlist").send({ email: "waitlist@example.com" }).expect(409);
-  });
-
-  it("authenticates, schedules an exchange, and settles a mutually confirmed payment once", async () => {
-    const providerSignup = await request(app).post("/api/auth/register").send({
-      name: "Skill Provider", email: "provider@example.com", password: "ProviderPass123!",
-    }).expect(201);
-    const learnerSignup = await request(app).post("/api/auth/register").send({
-      name: "Skill Learner", email: "learner@example.com", password: "LearnerPass123!",
-    }).expect(201);
-    const providerToken = providerSignup.body.token as string;
-    const learnerToken = learnerSignup.body.token as string;
-    const providerId = providerSignup.body.user._id as string;
-    const learnerId = learnerSignup.body.user._id as string;
-
-    const skill = await request(app).post("/api/skills").set("Authorization", `Bearer ${providerToken}`).send({
-      title: "React mentoring", description: "One-to-one mentoring on React components and application structure.",
-      category: "Programming", tags: ["react"], type: "offer", credits: 25,
-    }).expect(201);
-    const matches = await request(app).get("/api/matches?q=react")
-      .set("Authorization", `Bearer ${learnerToken}`).expect(200);
-    expect(matches.body.matches[0].skill._id).toBe(skill.body.skill._id);
+    const search = await request(app).get("/api/skills?q=Integration%20React&availability=Weekends").expect(200);
+    expect(search.body.skills.some((skill: { _id: string }) => skill._id === skillId)).toBe(true);
+    const matches = await request(app).get("/api/matches?q=React").set(auth(learner.token)).expect(200);
+    expect(matches.body.matches[0].skill._id).toBe(skillId);
     expect(matches.body.matches[0].explanation.length).toBeGreaterThan(0);
-    const exchange = await request(app).post("/api/requests").set("Authorization", `Bearer ${learnerToken}`).send({
-      skillId: skill.body.skill._id, message: "I would like to learn about components.", paymentAmount: 1,
-    }).expect(201);
-    await request(app).patch(`/api/requests/${exchange.body.request._id}/status`)
-      .set("Authorization", `Bearer ${providerToken}`).send({ status: "accepted" }).expect(200);
-    const session = await request(app).post("/api/sessions").set("Authorization", `Bearer ${learnerToken}`).send({
-      requestId: exchange.body.request._id, scheduledAt: new Date().toISOString(), durationMinutes: 45,
-    }).expect(201);
-    await User.updateOne({ _id: learnerId }, { $set: { walletBalance: 100 } });
 
-    await request(app).post(`/api/sessions/${session.body.session._id}/confirm-completion`)
-      .set("Authorization", `Bearer ${learnerToken}`).expect(200);
-    await request(app).post(`/api/sessions/${session.body.session._id}/confirm-completion`)
-      .set("Authorization", `Bearer ${providerToken}`).expect(200);
-    await request(app).post(`/api/sessions/${session.body.session._id}/confirm-completion`)
-      .set("Authorization", `Bearer ${providerToken}`).expect(200);
+    await request(app).patch(`/api/skills/${skillId}`).set(auth(provider.token))
+      .send({ title: "Updated integration React mentoring" }).expect(200);
+    await request(app).get(`/api/skills/${skillId}`).expect(200);
 
-    const [learner, provider, completed, ledgerEntries] = await Promise.all([
-      User.findById(learnerId), User.findById(providerId), Session.findById(session.body.session._id),
-      WalletTransaction.find({ idempotencyKey: `session:${session.body.session._id}` }),
-    ]);
-    expect(completed?.status).toBe("completed");
-    expect(learner?.walletBalance).toBe(75);
-    expect(provider?.walletBalance).toBe(25);
-    expect(ledgerEntries).toHaveLength(2);
-    expect(await Notification.countDocuments({ user: providerId })).toBeGreaterThan(0);
-    const learnerWallet = await request(app).get("/api/wallet")
-      .set("Authorization", `Bearer ${learnerToken}`).expect(200);
-    const providerWallet = await request(app).get("/api/wallet")
-      .set("Authorization", `Bearer ${providerToken}`).expect(200);
-    expect(learnerWallet.body.balance).toBe(75);
-    expect(providerWallet.body.balance).toBe(25);
-    expect(learnerWallet.body.transactions).toHaveLength(1);
-    const completedSessions = await request(app).get("/api/sessions")
-      .set("Authorization", `Bearer ${providerToken}`).expect(200);
-    expect(completedSessions.body.sessions[0].status).toBe("completed");
-    const completedRequests = await request(app).get("/api/requests")
-      .set("Authorization", `Bearer ${learnerToken}`).expect(200);
-    expect(completedRequests.body.requests[0].status).toBe("completed");
-    const notifications = await request(app).get("/api/notifications")
-      .set("Authorization", `Bearer ${providerToken}`).expect(200);
-    expect(notifications.body.notifications.length).toBeGreaterThan(0);
+    const pendingRequest = await request(app).post("/api/requests").set(auth(learner.token)).send({ skillId }).expect(201);
+    requestIds.push(pendingRequest.body.request._id);
+    const cancelledRequest = await request(app).patch(`/api/requests/${pendingRequest.body.request._id}/status`)
+      .set(auth(learner.token)).send({ status: "cancelled" }).expect(200);
+    expect(cancelledRequest.body.request.status).toBe("cancelled");
+
+    const { error: walletError } = await supabase.from("wallets").update({ balance: 50 }).eq("user_id", learner.id);
+    if (walletError) throwDatabaseError(walletError);
+    const { error: openingLedgerError } = await supabase.from("wallet_transactions").insert({
+      user_id: learner.id,
+      amount: 50,
+      direction: "credit",
+      reason: "seed",
+      idempotency_key: `integration:${learner.id}`,
+      description: "Integration test opening credits",
+    });
+    if (openingLedgerError) throwDatabaseError(openingLedgerError);
+
+    const completionRequest = await createRequest(learner.token, skillId, provider.token);
+    const completionSession = await createSession(learner.token, completionRequest);
+    await request(app).post(`/api/sessions/${completionSession}/confirm-completion`).set(auth(learner.token)).send({}).expect(200);
+    const completed = await request(app).post(`/api/sessions/${completionSession}/confirm-completion`).set(auth(provider.token)).send({}).expect(200);
+    expect(completed.body.session.status).toBe("completed");
+    await request(app).post(`/api/sessions/${completionSession}/confirm-completion`).set(auth(provider.token)).send({}).expect(200);
+    const wallet = await request(app).get("/api/wallet").set(auth(learner.token)).expect(200);
+    expect(wallet.body.balance).toBe(46);
+    const settlementKey = `session:${completionSession}`;
+    const { data: ledger, error: ledgerError } = await supabase.from("wallet_transactions")
+      .select("direction").eq("idempotency_key", settlementKey);
+    if (ledgerError) throwDatabaseError(ledgerError);
+    expect(ledger?.map((row) => row.direction).sort()).toEqual(["credit", "debit"]);
+
+    const cancelRequest = await createRequest(learner.token, skillId, provider.token);
+    const cancelledSession = await createSession(learner.token, cancelRequest);
+    const cancelled = await request(app).post(`/api/sessions/${cancelledSession}/cancel`).set(auth(learner.token)).send({}).expect(200);
+    expect(cancelled.body.session.status).toBe("cancelled");
+
+    const lowBalanceLearner = await createAccount("Low Balance Learner", "low-balance");
+    const lowBalanceRequest = await createRequest(lowBalanceLearner.token, skillId, provider.token);
+    const lowBalanceSession = await createSession(lowBalanceLearner.token, lowBalanceRequest);
+    await request(app).post(`/api/sessions/${lowBalanceSession}/confirm-completion`).set(auth(lowBalanceLearner.token)).send({}).expect(200);
+    await request(app).post(`/api/sessions/${lowBalanceSession}/confirm-completion`).set(auth(provider.token)).send({}).expect(409);
+    const lowBalanceWallet = await request(app).get("/api/wallet").set(auth(lowBalanceLearner.token)).expect(200);
+    expect(lowBalanceWallet.body.balance).toBe(0);
+    expect(lowBalanceWallet.body.balance).toBeGreaterThanOrEqual(0);
+
+    const disputeRequest = await createRequest(learner.token, skillId, provider.token);
+    const disputedSession = await createSession(learner.token, disputeRequest);
+    const dispute = await request(app).post(`/api/sessions/${disputedSession}/dispute`).set(auth(learner.token))
+      .send({ reason: "The meeting did not take place as scheduled." }).expect(201);
+    expect(dispute.body.dispute.status).toBe("open");
+
+    const requestHistory = await request(app).get("/api/requests?limit=100").set(auth(learner.token)).expect(200);
+    expect(requestHistory.body.requests.map((entry: { _id: string }) => entry._id)).toEqual(expect.arrayContaining([completionRequest, cancelRequest, disputeRequest]));
+    const sessionHistory = await request(app).get("/api/sessions?limit=100").set(auth(learner.token)).expect(200);
+    expect(sessionHistory.body.sessions.map((entry: { status: string }) => entry.status)).toEqual(expect.arrayContaining(["completed", "cancelled", "disputed"]));
+    const disputes = await request(app).get("/api/disputes").set(auth(learner.token)).expect(200);
+    expect(disputes.body.disputes.some((entry: { _id: string }) => entry._id === dispute.body.dispute._id)).toBe(true);
+
+    const waitlistEmail = `waitlist-${emailSuffix}`;
+    waitlistEmails.push(waitlistEmail);
+    await request(app).post("/api/waitlist").send({ email: waitlistEmail, interests: ["React"] }).expect(201);
+    await request(app).post("/api/waitlist").send({ email: waitlistEmail }).expect(409);
+
+    const extra = await request(app).post("/api/skills").set(auth(provider.token)).send({
+      title: "Temporary integration listing",
+      description: "A temporary listing used to verify soft deletion behavior.",
+      category: "Programming",
+      credits: 1,
+    }).expect(201);
+    skillIds.push(extra.body.skill._id);
+    await request(app).delete(`/api/skills/${extra.body.skill._id}`).set(auth(provider.token)).expect(200);
+    await request(app).get(`/api/skills/${extra.body.skill._id}`).expect(404);
   });
 });

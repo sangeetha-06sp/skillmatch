@@ -1,134 +1,103 @@
 # SkillBridge REST API
 
-TypeScript, Express, MongoDB, and Mongoose API. All routes are mounted under `/api`.
+TypeScript and Express API backed by Supabase PostgreSQL via `@supabase/supabase-js`. All routes are mounted under `/api`. The React app talks to this API; it must never receive the Supabase service-role key.
+
+## Database setup
+
+Create `server/.env` from `server/.env.example`, then set the Supabase project URL, service-role key, and a random JWT secret. In the Supabase dashboard, open **SQL Editor** and run these committed scripts in this exact order:
+
+1. `supabase/migrations/001_schema.sql`
+2. `supabase/migrations/002_exchange_functions.sql`
+3. `supabase/migrations/003_row_level_security.sql`
+
+They create the users, skills, exchange_requests, sessions, wallets, wallet_transactions, notifications, waitlists, and disputes tables; their constraints, indexes, updated-at triggers, and RLS policies; and the restricted PostgreSQL functions used by scheduling, cancellations, disputes, idempotent wallet settlement, and platform statistics. No table needs to exist in advance. The API checks database connectivity on startup and `/api/health` reports whether PostgreSQL is connected.
+
+The migration scripts do not import MongoDB records. Back up/export existing MongoDB data and plan/import it separately before directing production traffic at the new database.
 
 ## Run locally
 
 ```bash
 npm install
 cp .env.example .env
+# Fill server/.env with actual Supabase credentials and a strong JWT_SECRET.
 npm run dev
 ```
 
-Start a local MongoDB instance, or set `MONGODB_URI` to a MongoDB Atlas URI. The API exits with a clear error if MongoDB is unavailable. For a temporary development database, set `MONGODB_URI=memory://`; `mongodb-memory-server` downloads a MongoDB binary on first use and discards data when the API process exits. Do not use this option in production.
+From the repository root, copy `server/.env.example` to `server/.env` and use `npm run dev:all` to run the API and Vite frontend together. The root `.env.example` sends `/api` through Vite's development proxy to `http://localhost:4000`. Set `CLIENT_ORIGIN` to the frontend origin(s) allowed by CORS.
 
-The root client runs on port `5173`; set `CLIENT_ORIGIN=http://localhost:5173` in `server/.env`. The root `.env.example` sets `VITE_API_URL=/api`; Vite proxies `/api` to `VITE_PROXY_TARGET=http://localhost:4000`. For production, configure the frontend API URL and backend CORS origin for your deployed domains.
-
-To create sample users and listings:
+Optional sample fixtures:
 
 ```bash
 npm run seed
 ```
 
-| Account | Email | Password |
-|---|---|---|
-| Admin | `admin@skillbridge.demo` | `SEED_ADMIN_PASSWORD` (default: `ChangeMe123!`; demo only) |
-| Student | `avery@skillbridge.demo` | `AveryDemo123!` |
-| Student | `jordan@skillbridge.demo` | `JordanDemo123!` |
+The optional seed command inserts demo accounts and listings, but does not award credits. Do not use demo passwords outside local development.
 
-Change the admin password and JWT secret before using any non-local environment. Never use these demo credentials in production.
+## Environment
 
-## Commands
+| Variable | Required | Purpose |
+|---|---:|---|
+| `SUPABASE_URL` | Yes | HTTPS Supabase project URL. |
+| `SUPABASE_SERVICE_ROLE_KEY` | Yes | Server-only Supabase service-role/secret key. Never expose through Vite or commit it. |
+| `JWT_SECRET` | Yes | Random token-signing secret; at least 32 characters in production. |
+| `JWT_EXPIRES_IN` | No | Access-token expiry (default `1d`). |
+| `NODE_ENV` | No | `development` locally; set to `production` when deployed. |
+| `PORT` | No | API port (default `4000`). |
+| `CLIENT_ORIGIN` | No | Comma-separated CORS origins (default `http://localhost:5173`). |
+| `PLATFORM_FEE_PERCENT` | No | Validated platform fee percentage (default `0`). |
+| `SEED_ADMIN_PASSWORD` | No | Password for the optional seeded administrator. |
 
-| Command | Description |
-|---|---|
-| `npm run dev` | Watch-mode API server. |
-| `npm run build` | Strict TypeScript compilation to `dist/`. |
-| `npm start` | Run the compiled server. |
-| `npm run seed` | Insert demo users and listings. |
-| `npm test` | Run API integration and matching tests. |
+The frontend uses only `VITE_API_URL` and `VITE_PROXY_TARGET` from the root `.env`; neither is a Supabase credential.
 
-## Authentication and security
+## Security and transactions
 
-- Register and login to receive a signed JWT. Send it as `Authorization: Bearer <token>` on protected routes.
-- Passwords are bcrypt-hashed. Registration requires at least 10 characters with an uppercase letter, lowercase letter, and digit.
-- Authenticated user IDs and admin roles are taken from the verified token/database, never from request bodies.
-- Helmet, a restrictive configurable CORS allow-list, JSON body limits, and rate limiting are enabled.
-- Zod validates request bodies and query filters. Errors use consistent JSON responses and safe messages.
-- All listing and administrative list APIs paginate. Monetary values are whole virtual credits; clients never submit or set wallet balances.
-- Session completion requires confirmation from both participants. Wallet settlement is idempotent and uses MongoDB transactions on replica sets. Standalone development MongoDB uses guarded conditional balance updates, an idempotency key, and compensation for failed credits. Use a replica set for crash-safe multi-document transactions in production.
+- Passwords use bcrypt hashing. Registration and login issue the existing signed JWTs; authentication reloads the account and checks account status and token version.
+- Private endpoints require `Authorization: Bearer <JWT>`. Admin endpoints additionally require a database-backed admin role.
+- The server uses the service-role key; RLS policies deny direct private data access to browser roles and expose only active public listings and waitlist submission. Do not give the service-role key to the frontend.
+- The PostgreSQL `confirm_session_completion` function locks the session and both wallets, waits for both participant confirmations, checks the payer's balance, transfers credits and writes both ledger entries in the same transaction. A database check prohibits negative balances; unique idempotency keys prevent duplicate transfers.
+- Scheduling, cancellation, and dispute creation are likewise database functions so their related state changes are atomic.
+- Helmet, a configurable CORS allow-list, request-size limits, rate limiting, Zod request validation, pagination, and centralized error responses are enabled.
 
-## Endpoints
+## API endpoints
 
-`/api/health` is public. Unless marked **Public**, routes below require a bearer token. **Admin** routes additionally require the database role `admin`.
-
-### Health and authentication
+Unless marked **Public**, routes require a bearer token. **Admin** routes additionally require the database role `admin`.
 
 | Method | Path | Purpose |
 |---|---|---|
 | `GET` | `/api/health` | Database readiness. |
-| `POST` | `/api/auth/register` | Register a student and return `{ user, token }`. |
+| `POST` | `/api/auth/register` | Register and return `{ user, token }`. |
 | `POST` | `/api/auth/login` | Authenticate and return `{ user, token }`. |
-| `GET` | `/api/auth/me` | Get the current profile. |
-| `PATCH` | `/api/auth/me` | Update profile fields (name, bio, college, department, year, interests, availability, skill text, avatar URL). |
-| `PATCH` | `/api/auth/password` | Verify the current password and change it; revokes existing tokens. |
-| `GET` | `/api/auth/users/:id` | View a public student profile. |
+| `GET` / `PATCH` | `/api/auth/me` | Read or update the signed-in profile. |
+| `PATCH` | `/api/auth/password` | Verify and change password; revokes previous JWTs. |
+| `GET` | `/api/auth/users/:id` | **Private** view of an active public profile. |
+| `GET` | `/api/skills?q=&category=&type=&mode=&level=&availability=&page=&limit=` | **Public** full-text search and listing filters. |
+| `GET` | `/api/skills/mine` | List the signed-in user's listings. |
+| `POST` | `/api/skills` | Create an offer or learning request. |
+| `GET` | `/api/skills/:id` | **Public** active listing details. |
+| `PATCH` / `DELETE` | `/api/skills/:id` | Update or deactivate an owned listing (admins may moderate). |
+| `GET` | `/api/matches?q=` or `/api/matches?skillId=` | Weighted recommendations with match explanations. |
+| `GET` / `POST` | `/api/requests` | View exchange history or request an offered skill. |
+| `PATCH` | `/api/requests/:id/status` | Provider accepts/rejects; requester cancels. |
+| `GET` / `POST` | `/api/sessions` | View exchange history or schedule an accepted exchange. |
+| `POST` | `/api/sessions/:id/start` | Start a scheduled session. |
+| `POST` | `/api/sessions/:id/cancel` | Atomically cancel an unconfirmed scheduled session. |
+| `POST` | `/api/sessions/:id/confirm-completion` | Confirm completion; settles credits after both confirmations. |
+| `POST` | `/api/sessions/:id/dispute` | Open a dispute and put the session on hold. |
+| `GET` | `/api/wallet?page=&limit=` | Authoritative balance and private wallet ledger. |
+| `GET` / `PATCH` | `/api/notifications` and `/api/notifications/:id/read` | List or mark owned notifications read. |
+| `POST` | `/api/notifications/read-all` | Mark all owned notifications read. |
+| `POST` | `/api/waitlist` | **Public** waitlist signup. |
+| `GET` | `/api/disputes` and `/api/disputes/:id` | View own disputes; participants/admins may view details. |
+| `GET` | `/api/admin/stats`, `/api/admin/users`, `/api/admin/disputes`, `/api/admin/waitlist`, `/api/admin/wallet-transactions` | **Admin** platform overview and audit lists. |
+| `PATCH` | `/api/admin/users/:id/status`, `/api/admin/disputes/:id`, `/api/admin/waitlist/:id` | **Admin** account and moderation workflows. |
 
-Example registration:
+Errors use `{ "error": { "code": "...", "message": "...", "details": ... } }`. Paginated responses include `pagination` with page, limit, total, and page count.
 
-```json
-{
-  "name": "Alex Morgan",
-  "email": "alex@university.edu",
-  "password": "SecurePass123",
-  "college": "Stanford University",
-  "department": "Computer Science",
-  "year": "3rd year"
-}
+## Tests
+
+```bash
+npm run build
+npm test
 ```
 
-### Listings and matching
-
-| Method | Path | Purpose |
-|---|---|---|
-| `GET` | `/api/skills?q=&category=&type=&mode=&level=&availability=&page=&limit=` | **Public** search/filter active listings. |
-| `GET` | `/api/skills/mine` | List the signed-in user’s listings. |
-| `POST` | `/api/skills` | Create an offer or learning request; optional `availability` and `credits` are stored on the listing. |
-| `GET` | `/api/skills/:id` | **Public** listing detail. |
-| `PATCH` | `/api/skills/:id` | Update an owned listing; admins can moderate. |
-| `DELETE` | `/api/skills/:id` | Deactivate an owned listing; admins can moderate. |
-| `GET` | `/api/matches?q=` | Rank active offered skills and include a point-by-point score explanation. |
-| `GET` | `/api/matches?skillId=` | Match against an offer owned by the signed-in user. |
-
-Listing levels are `beginner`, `intermediate`, `advanced`, or `expert`; modes are `online`, `in-person`, or `either`; types are `offer` and `request`.
-
-### Exchanges and sessions
-
-| Method | Path | Purpose |
-|---|---|---|
-| `GET` | `/api/requests?page=&limit=` | List requests involving the signed-in user. |
-| `POST` | `/api/requests` | Request another student’s offered skill; accepts `skillId` and optional `message`. The amount is copied from the server-owned listing price, never from the client. |
-| `PATCH` | `/api/requests/:id/status` | Accept/reject as provider, or cancel as requester. |
-| `GET` | `/api/sessions?page=&limit=` | List sessions involving the signed-in user. |
-| `POST` | `/api/sessions` | Schedule an accepted exchange (`requestId`, ISO `scheduledAt`, `durationMinutes`, optional `mode`, `meetingUrl`, `notes`). |
-| `POST` | `/api/sessions/:id/start` | Start a scheduled session. |
-| `POST` | `/api/sessions/:id/cancel` | Cancel an unconfirmed scheduled session; no credits transfer. |
-| `POST` | `/api/sessions/:id/confirm-completion` | Confirm a session; credits transfer after both participants confirm. |
-| `POST` | `/api/sessions/:id/dispute` | Report a session problem with a reason; the session is put on hold. |
-
-### Wallet, notifications, and waitlist
-
-| Method | Path | Purpose |
-|---|---|---|
-| `GET` | `/api/wallet?page=&limit=` | Get the authenticated user’s authoritative balance and transaction history. |
-| `GET` | `/api/notifications?unread=true&page=&limit=` | List notifications and unread count. |
-| `PATCH` | `/api/notifications/:id/read` | Mark one owned notification as read. |
-| `POST` | `/api/notifications/read-all` | Mark all notifications as read. |
-| `POST` | `/api/waitlist` | **Public** join the waitlist with email, name, and interests. |
-
-### Disputes and administration
-
-| Method | Path | Access | Purpose |
-|---|---|---|---|
-| `GET` | `/api/disputes` | User/Admin | Users see their own disputes; admins see all. |
-| `GET` | `/api/disputes/:id` | Participant/Admin | View a dispute. |
-| `GET` | `/api/admin/stats` | Admin | Aggregate platform statistics. |
-| `GET` | `/api/admin/users?q=&page=&limit=` | Admin | Search and paginate users. |
-| `PATCH` | `/api/admin/users/:id/status` | Admin | Activate/deactivate an account; deactivation revokes tokens. |
-| `GET` | `/api/admin/disputes?status=&page=&limit=` | Admin | Review disputes. |
-| `PATCH` | `/api/admin/disputes/:id` | Admin | Update status and include a resolution note when closing. |
-| `GET` | `/api/admin/waitlist?status=&page=&limit=` | Admin | Review waitlist entries. |
-| `PATCH` | `/api/admin/waitlist/:id` | Admin | Set waitlist status to pending, invited, or joined. |
-| `GET` | `/api/admin/wallet-transactions?page=&limit=` | Admin | Audit wallet transactions. |
-
-Errors use `{ "error": { "code": "...", "message": "...", "details": ... } }`. Success responses are JSON objects; paginated lists include a `pagination` object with page, limit, total, and page count. See `test/` for examples of authentication, admin authorization, matching, session completion, and one-time settlement.
+The matching unit tests run without database credentials. The end-to-end exchange-flow test runs only when `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` are configured and all three migrations have been applied. It creates uniquely named test records and removes them afterward.

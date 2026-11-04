@@ -1,25 +1,24 @@
-import mongoose from "mongoose";
+import { createClient } from "@supabase/supabase-js";
 import { env } from "./env";
 
-let memoryServer: import("mongodb-memory-server").MongoMemoryServer | undefined;
+export const supabase = createClient(env.supabaseUrl || "https://placeholder.supabase.co", env.supabaseServiceRoleKey || "placeholder", {
+  auth: { autoRefreshToken: false, persistSession: false },
+});
+
+let databaseReady = false;
 
 export async function connectDatabase(): Promise<void> {
-  let uri = env.mongoUri;
-  if (uri === "memory://") {
-    if (env.nodeEnv === "production") throw new Error("The in-memory database cannot be used in production");
-    const { MongoMemoryServer } = await import("mongodb-memory-server");
-    memoryServer = await MongoMemoryServer.create();
-    uri = memoryServer.getUri("skillbridge");
-    console.warn("Using ephemeral MongoDB memory server; all data is lost when the process exits.");
-  }
-  await mongoose.connect(uri, { serverSelectionTimeoutMS: 8000 });
-  console.info(`MongoDB connected (${mongoose.connection.host}/${mongoose.connection.name})`);
+  const { data, error } = await supabase.rpc("skillbridge_schema_health_check");
+  if (error) throw new Error(`Supabase connection/schema check failed: ${error.message}. Run all documented SQL migrations in order.`);
+  if (data !== true) throw new Error("Supabase is reachable but its schema, RPCs, or RLS setup is incomplete. Run all documented SQL migrations in order.");
+  databaseReady = true;
+  console.info("Supabase PostgreSQL connected and application schema verified.");
 }
 
 export async function disconnectDatabase(): Promise<void> {
-  await mongoose.disconnect();
-  await memoryServer?.stop();
+  databaseReady = false;
 }
 
-mongoose.connection.on("error", (error) => console.error("MongoDB connection error:", error.message));
-mongoose.connection.on("disconnected", () => console.warn("MongoDB disconnected"));
+export function isDatabaseReady(): boolean {
+  return databaseReady;
+}

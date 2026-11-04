@@ -8,7 +8,7 @@ import {
 import { Link, Navigate, Route, Routes, useLocation, useNavigate, useParams } from "react-router-dom";
 import { toast } from "sonner";
 import { useApp, type ExchangeRequest, type LearningSession, type Skill, type SkillMatch, type Student } from "./context/AppContext";
-import { apiConfigured, apiDelete, apiGet, apiLogin, apiPatch, apiRegister, type ApiSkill } from "./services/api";
+import { apiConfigured, apiDelete, apiGet, apiLogin, apiPatch, apiPost, apiRegister, type ApiSkill } from "./services/api";
 
 const navigation = [
   { label: "Overview", to: "/app", icon: LayoutDashboard },
@@ -90,6 +90,7 @@ function AppLayout({ children }: { children: ReactNode }) {
 function Landing() {
   const { theme, setTheme } = useApp();
   const navigate = useNavigate();
+  const [waitlistOpen, setWaitlistOpen] = useState(false);
   return (
     <div className="landing-page">
       <header className="landing-nav"><Link to="/" className="brand"><span className="brand-mark"><Sparkles size={19} /></span><span>skillbridge<span className="brand-ai">.ai</span></span></Link><nav><a href="#how-it-works">How it works</a><a href="#community">Community</a><a href="#about">About</a></nav><div className="landing-nav-actions"><button className="icon-button theme-toggle" aria-label="Toggle color theme" onClick={() => setTheme(theme === "dark" ? "light" : "dark")}>{theme === "dark" ? <Sun size={18} /> : <Moon size={18} />}</button><button className="button button-ghost landing-login" onClick={() => navigate("/login")}>Log in</button><button className="button button-primary landing-signup" onClick={() => navigate("/register")}>Get started <ArrowRight size={16} /></button></div></header>
@@ -102,10 +103,46 @@ function Landing() {
       <section className="trust-strip" id="community"><span>CURIOUS MINDS FROM</span><b>stanford</b><b>MIT</b><b>Berkeley</b><b>NYU</b><b>Georgia Tech</b><b>+ more</b></section>
       <section className="features-section" id="about"><div className="section-heading"><span className="eyebrow">A BETTER WAY TO GROW</span><h2>Trade skills. Build <span className="gradient-text">momentum.</span></h2><p>Learning is better when you do it together. We make it easy to find the right person and get started.</p></div><div className="feature-grid"><FeatureCard icon={<Target />} label="01 / DISCOVER" title="Find your learning match" description="Meet students who have what you want to learn — and are excited about what you have to teach." tone="violet" /><FeatureCard icon={<Zap />} label="02 / EXCHANGE" title="Knowledge is currency" description="Teach for credits. Use them to learn. A fair exchange that values everyone's time and talent." tone="cyan" /><FeatureCard icon={<Sparkles />} label="03 / LEVEL UP" title="Progress, together" description="Grow your skills, build your portfolio, and make friendships that last beyond the classroom." tone="pink" /></div></section>
       <section className="how-section" id="how-it-works"><div className="how-visual"><div className="how-card"><div className="how-card-top"><span className="eyebrow">YOUR NEXT EXCHANGE</span><span className="live-tag"><i /> MATCHED</span></div><div className="exchange-person"><Avatar name="Priya Sharma" initials="PS" size="lg" /><div><b>Priya Sharma</b><small>Stanford · 4th year</small></div><span className="exchange-match">96% match</span></div><div className="exchange-flow"><div><span className="exchange-skill-icon purple"><ArrowUpRight size={17} /></span><div><b>She teaches</b><small>Machine learning</small></div></div><ArrowRight size={18} /><div><span className="exchange-skill-icon cyan"><ArrowDownRight size={17} /></span><div><b>You teach</b><small>React & TypeScript</small></div></div></div><div className="exchange-footer"><span><Check size={14} /> Fair exchange, made easy</span><span><Clock3 size={14} /> 60 min</span></div></div><div className="how-orbit orbit" /><div className="how-sparkle"><Sparkles size={24} /></div></div><div className="how-copy"><span className="eyebrow">SIMPLE BY DESIGN</span><h2>Good things happen when skills <span className="gradient-text">connect.</span></h2><p>No awkward cold DMs. No confusing barters. Just an easy way to learn from the people around you.</p><div className="steps"><Step number="01" title="Show what you know" text="Add skills you'd love to share and things you're curious about." /><Step number="02" title="Meet your match" text="Our transparent AI finds students who learn and teach like you." /><Step number="03" title="Make it happen" text="Book a session, swap knowledge, and celebrate your progress." /></div><button className="button button-primary" onClick={() => navigate("/register")}>Your next chapter starts here <ArrowRight size={16} /></button></div></section>
-      <section className="cta-section"><div className="cta-stars" /><div className="cta-orb"><Sparkles size={27} /></div><span className="eyebrow">YOUR PEOPLE ARE OUT THERE</span><h2>One skill can change<br />your whole <span className="gradient-text">orbit.</span></h2><p>Join students learning from each other — one good conversation at a time.</p><button className="button button-primary button-large" onClick={() => navigate("/register")}>Join the community <ArrowRight size={17} /></button><div className="cta-footnote"><Check size={13} /> Free to join <span /> Built for students <span /> Always a fair exchange</div></section>
+      <section className="cta-section"><div className="cta-stars" /><div className="cta-orb"><Sparkles size={27} /></div><span className="eyebrow">YOUR PEOPLE ARE OUT THERE</span><h2>One skill can change<br />your whole <span className="gradient-text">orbit.</span></h2><p>Join students learning from each other — one good conversation at a time.</p><button className="button button-primary button-large" onClick={() => navigate("/register")}>Join the community <ArrowRight size={17} /></button>{apiConfigured && <button className="text-link" onClick={() => setWaitlistOpen(true)}>Join the waitlist <ArrowRight size={14} /></button>}<div className="cta-footnote"><Check size={13} /> Free to join <span /> Built for students <span /> Always a fair exchange</div></section>
       <footer className="landing-footer"><Link to="/" className="brand"><span className="brand-mark"><Sparkles size={17} /></span><span>skillbridge<span className="brand-ai">.ai</span></span></Link><span>Learning is better together. © 2025 SkillBridge AI</span><div><a href="#about">About us</a><a href="#how-it-works">How it works</a><a href="mailto:hello@skillbridge.ai">Get in touch</a></div></footer>
+      {waitlistOpen && <WaitlistDialog onClose={() => setWaitlistOpen(false)} />}
     </div>
   );
+}
+
+function WaitlistDialog({ onClose }: { onClose: () => void }) {
+  const [name, setName] = useState("");
+  const [email, setEmail] = useState("");
+  const [interests, setInterests] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+
+  async function submit(event: FormEvent) {
+    event.preventDefault();
+    if (submitting) return;
+    setSubmitting(true);
+    try {
+      await apiPost("/waitlist", {
+        name: name.trim(),
+        email: email.trim(),
+        interests: interests.split(",").map((interest) => interest.trim()).filter(Boolean).slice(0, 20),
+      });
+      toast.success("You’re on the SkillBridge waitlist. We’ll be in touch.");
+      onClose();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Could not join the waitlist.");
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  return <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><form className="modal-card" onSubmit={submit}>
+    <div className="modal-heading"><div><span className="eyebrow">A PLACE IN THE GALAXY</span><h2>Join the waitlist</h2></div><button type="button" className="icon-button" aria-label="Close dialog" onClick={onClose}><X size={19} /></button></div>
+    <p className="muted-copy">Leave your details and we’ll let you know when there’s news to share.</p>
+    <label className="field-label">Name <small className="field-hint">Optional</small><input value={name} onChange={(event) => setName(event.target.value)} maxLength={80} /></label>
+    <label className="field-label">Email<input type="email" value={email} onChange={(event) => setEmail(event.target.value)} maxLength={254} required /></label>
+    <label className="field-label">What would you like to learn?<small className="field-hint">Optional · separate topics with commas</small><input value={interests} onChange={(event) => setInterests(event.target.value)} /></label>
+    <div className="modal-footer"><Button variant="ghost" onClick={onClose}>Cancel</Button><Button type="submit" disabled={submitting}>{submitting ? "Joining…" : "Join waitlist"} {!submitting && <ArrowRight size={15} />}</Button></div>
+  </form></div>;
 }
 
 function FeatureCard({ icon, label, title, description, tone }: { icon: ReactNode; label: string; title: string; description: string; tone: string }) {
@@ -228,14 +265,14 @@ function SessionRow({ session }: { session: LearningSession }) {
 
 function MiniMatch({ skill, score }: { skill: Skill; score: number }) {
   const { sendRequest, requests } = useApp();
-  const alreadyRequested = requests.some((request) => request.skill === skill.title && request.status === "Pending");
+  const alreadyRequested = requests.some((request) => (request.skillId ? request.skillId === skill.id : request.skill === skill.title) && request.status === "Pending");
   return <div className="mini-match"><Avatar name={skill.owner} initials={skill.avatar} size="md" /><div className="mini-match-info"><b>{skill.owner}</b><span>{skill.title}</span><small>{skill.college}</small></div><span className="match-score">{score}% <small>match</small></span><button className="mini-match-action" aria-label={`Request session with ${skill.owner}`} disabled={alreadyRequested} onClick={() => { void sendRequest(skill).then(() => toast.success(`Request sent to ${skill.owner}.`)).catch((error: unknown) => toast.error(error instanceof Error ? error.message : "Could not send request.")); }}>{alreadyRequested ? <Check size={16} /> : <ArrowRight size={16} />}</button></div>;
 }
 
 function SkillCard({ skill, score, reason }: { skill: Skill; score?: number; reason?: string }) {
   const { sendRequest, requests, savedSkills, toggleSaved, user } = useApp();
-  const requested = requests.some((request) => request.skill === skill.title && request.status === "Pending");
-  const ownSkill = skill.owner === user?.name;
+  const requested = requests.some((request) => (request.skillId ? request.skillId === skill.id : request.skill === skill.title) && request.status === "Pending");
+  const ownSkill = skill.ownerId ? skill.ownerId === user?.id : skill.owner === user?.name;
   const saved = savedSkills.includes(skill.id);
   return <article className="skill-card"><div className="skill-card-top"><span className="category-chip">{skill.category}</span><button className={`save-button ${saved ? "saved" : ""}`} aria-label={saved ? "Remove saved skill" : "Save skill"} onClick={() => { toggleSaved(skill.id); toast.success(saved ? "Removed from saved skills." : "Saved for later."); }}><Heart size={17} fill={saved ? "currentColor" : "none"} /></button></div><div className="skill-card-owner"><Avatar name={skill.owner} initials={skill.avatar} size="md" /><div><b>{skill.owner}</b><small>{skill.college}</small></div><span className="rating"><Star size={13} fill="currentColor" /> {skill.rating.toFixed(1)}</span></div><h3><Link to={`/skills/${skill.id}`} className="skill-title-link">{skill.title}</Link></h3><p className="skill-description">{skill.description}</p><div className="skill-tags">{skill.tags.map((tag) => <span key={tag}>{tag}</span>)}</div>{reason && <div className="match-reason"><Sparkles size={14} /> {reason}</div>}<div className="skill-card-meta"><span><span className="level-dot" /> {skill.level}</span><span><Clock3 size={14} /> {skill.availability}</span></div><div className="skill-card-footer"><span className="skill-credits"><Zap size={14} fill="currentColor" /> {skill.credits} credits <small>/ session</small></span>{score !== undefined && <span className="card-match-score">{score}% match</span>}</div><div className="skill-card-actions">{ownSkill ? <Link className="button button-outline card-button" to="/my-listings">Manage listing <ArrowRight size={14} /></Link> : <button className="button button-primary card-button" disabled={requested} onClick={() => { void sendRequest(skill).then(() => toast.success(`Request sent to ${skill.owner}.`)).catch((error: unknown) => toast.error(error instanceof Error ? error.message : "Could not send request.")); }}>{requested ? <>Request sent <Check size={15} /></> : <>Request to learn <ArrowRight size={15} /></>}</button>}</div></article>;
 }
@@ -318,7 +355,7 @@ function SkillDetails() {
   }, [getSkill, skillId]);
   const skill = apiConfigured ? remoteSkill ?? localSkill : localSkill;
   if (!skill) return loadingSkill ? <div className="page-stack"><p className="muted-copy" role="status">Loading skill listing…</p></div> : <NotFound />;
-  const exchange = requests.find((request) => request.skill === skill.title && ["Pending", "Accepted"].includes(request.status));
+  const exchange = requests.find((request) => (request.skillId ? request.skillId === skill.id : request.skill === skill.title) && ["Pending", "Accepted"].includes(request.status));
   const requested = Boolean(exchange);
   const acceptedRequest = exchange?.status === "Accepted" ? exchange : undefined;
   const isOwner = user?.name === skill.owner;
@@ -372,7 +409,7 @@ function MyListings() {
   const navigate = useNavigate();
   const [editing, setEditing] = useState<Skill | null>(null);
   const [saving, setSaving] = useState(false);
-  const owned = skills.filter((skill) => skill.owner === user?.name);
+  const owned = skills.filter((skill) => skill.ownerId ? skill.ownerId === user?.id : skill.owner === user?.name);
   async function saveListing(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!editing || saving) return;
@@ -387,7 +424,7 @@ function MyListings() {
       setSaving(false);
     }
   }
-  return <div className="page-stack"><PageTitle eyebrow="YOUR LITTLE CORNER OF THE GALAXY" title="What you love to teach" description="Your shared skills make the whole community a little smarter." action={<Button onClick={() => navigate("/create")}><Plus size={16} /> Create a listing</Button>} />{owned.length ? <div className="listing-management-grid">{owned.map((skill) => <div className="manage-card" key={skill.id}><div className="manage-card-top"><span className="category-chip">{skill.category}</span><div className="inline-actions"><button className="icon-button" title="Edit listing" aria-label={`Edit ${skill.title}`} onClick={() => setEditing(editing?.id === skill.id ? null : { ...skill })}><Pencil size={15} /></button><button className="icon-button danger-button" title="Delete listing" aria-label={`Delete ${skill.title}`} onClick={() => { if (window.confirm(`Remove "${skill.title}" from your listings?`)) { void deleteSkill(skill.id).then(() => toast.success("Your listing has been removed.")).catch((error: unknown) => toast.error(error instanceof Error ? error.message : "Could not remove listing.")); } }}><X size={16} /></button></div></div>{editing?.id === skill.id ? <form className="listing-edit-form" onSubmit={(event) => void saveListing(event)}><label className="field-label">Title<input required minLength={3} maxLength={100} value={editing.title} onChange={(event) => setEditing({ ...editing, title: event.target.value })} /></label><label className="field-label">Category<select value={editing.category} onChange={(event) => setEditing({ ...editing, category: event.target.value })}>{categories.slice(1).map((item) => <option key={item}>{item}</option>)}</select></label><label className="field-label">Description<textarea required minLength={10} maxLength={2000} rows={4} value={editing.description} onChange={(event) => setEditing({ ...editing, description: event.target.value })} /></label><label className="field-label">Topics / tags<input value={editing.tags.join(", ")} onChange={(event) => setEditing({ ...editing, tags: event.target.value.split(",").map((tag) => tag.trim()).filter(Boolean) })} /><small className="field-hint">Separate each topic with a comma.</small></label><label className="field-label">Experience level<select value={editing.level} onChange={(event) => setEditing({ ...editing, level: event.target.value })}>{["Beginner", "Intermediate", "Advanced", "All levels"].map((item) => <option key={item}>{item}</option>)}</select></label><div className="form-footer"><Button type="button" variant="ghost" onClick={() => setEditing(null)}>Cancel</Button><Button type="submit" disabled={saving}>{saving ? "Saving…" : "Save changes"} {!saving && <Check size={15} />}</Button></div></form> : <><h3>{skill.title}</h3><p>{skill.description}</p><div className="skill-tags">{skill.tags.map((tag) => <span key={tag}>{tag}</span>)}</div><div className="manage-card-footer"><span><span className="level-dot" /> {skill.level}</span><span><Zap size={14} /> {skill.credits} credits / session</span><span><Users size={14} /> {requests.filter((request) => request.skill === skill.title).length} requests</span></div></>}</div>)}</div> : <EmptyState icon={<Bookmark size={22} />} title="Your teaching story starts here" text="Share something you know. There’s someone out there hoping to learn it." action={<Button onClick={() => navigate("/create")}><Plus size={16} /> Share your first skill</Button>} />}</div>;
+  return <div className="page-stack"><PageTitle eyebrow="YOUR LITTLE CORNER OF THE GALAXY" title="What you love to teach" description="Your shared skills make the whole community a little smarter." action={<Button onClick={() => navigate("/create")}><Plus size={16} /> Create a listing</Button>} />{owned.length ? <div className="listing-management-grid">{owned.map((skill) => <div className="manage-card" key={skill.id}><div className="manage-card-top"><span className="category-chip">{skill.category}</span><div className="inline-actions"><button className="icon-button" title="Edit listing" aria-label={`Edit ${skill.title}`} onClick={() => setEditing(editing?.id === skill.id ? null : { ...skill })}><Pencil size={15} /></button><button className="icon-button danger-button" title="Delete listing" aria-label={`Delete ${skill.title}`} onClick={() => { if (window.confirm(`Remove "${skill.title}" from your listings?`)) { void deleteSkill(skill.id).then(() => toast.success("Your listing has been removed.")).catch((error: unknown) => toast.error(error instanceof Error ? error.message : "Could not remove listing.")); } }}><X size={16} /></button></div></div>{editing?.id === skill.id ? <form className="listing-edit-form" onSubmit={(event) => void saveListing(event)}><label className="field-label">Title<input required minLength={3} maxLength={100} value={editing.title} onChange={(event) => setEditing({ ...editing, title: event.target.value })} /></label><label className="field-label">Category<select value={editing.category} onChange={(event) => setEditing({ ...editing, category: event.target.value })}>{categories.slice(1).map((item) => <option key={item}>{item}</option>)}</select></label><label className="field-label">Description<textarea required minLength={10} maxLength={2000} rows={4} value={editing.description} onChange={(event) => setEditing({ ...editing, description: event.target.value })} /></label><label className="field-label">Topics / tags<input value={editing.tags.join(", ")} onChange={(event) => setEditing({ ...editing, tags: event.target.value.split(",").map((tag) => tag.trim()).filter(Boolean) })} /><small className="field-hint">Separate each topic with a comma.</small></label><label className="field-label">Experience level<select value={editing.level} onChange={(event) => setEditing({ ...editing, level: event.target.value })}>{["Beginner", "Intermediate", "Advanced", "All levels"].map((item) => <option key={item}>{item}</option>)}</select></label><div className="form-footer"><Button type="button" variant="ghost" onClick={() => setEditing(null)}>Cancel</Button><Button type="submit" disabled={saving}>{saving ? "Saving…" : "Save changes"} {!saving && <Check size={15} />}</Button></div></form> : <><h3>{skill.title}</h3><p>{skill.description}</p><div className="skill-tags">{skill.tags.map((tag) => <span key={tag}>{tag}</span>)}</div><div className="manage-card-footer"><span><span className="level-dot" /> {skill.level}</span><span><Zap size={14} /> {skill.credits} credits / session</span><span><Users size={14} /> {requests.filter((request) => request.skillId ? request.skillId === skill.id : request.skill === skill.title).length} requests</span></div></>}</div>)}</div> : <EmptyState icon={<Bookmark size={22} />} title="Your teaching story starts here" text="Share something you know. There’s someone out there hoping to learn it." action={<Button onClick={() => navigate("/create")}><Plus size={16} /> Share your first skill</Button>} />}</div>;
 }
 
 function EmptyState({ icon, title, text, action }: { icon: ReactNode; title: string; text: string; action?: ReactNode }) {
@@ -650,6 +687,7 @@ function ToggleRow({ title, description, value, onChange }: { title: string; des
 type AdminUserRow = { id?: string; name: string; email: string; campus: string; credits: number; status: "Active" | "Paused" };
 type AdminDisputeRow = { id: string; title: string; parties: string; created: string; status: "Needs review" | "In progress" | "Resolved" | "Dismissed" };
 type AdminStatistics = { users: number; activeSkills: number; requests: number; sessions: number; openDisputes: number; transferredCredits: number; pendingWaitlist: number };
+type AdminWaitlistRow = { id: string; name: string; email: string; interests: string[]; status: "pending" | "invited" | "joined"; createdAt: string };
 
 function AdminDashboard() {
   const [users, setUsers] = useState<AdminUserRow[]>([
@@ -670,22 +708,25 @@ function LiveAdminDashboard() {
   const [users, setUsers] = useState<AdminUserRow[]>([]);
   const [disputes, setDisputes] = useState<AdminDisputeRow[]>([]);
   const [listings, setListings] = useState<ApiSkill[]>([]);
+  const [waitlist, setWaitlist] = useState<AdminWaitlistRow[]>([]);
   const [loading, setLoading] = useState(true);
   useEffect(() => {
     let active = true;
     async function load() {
       try {
-        const [statsResult, usersResult, disputesResult, skillsResult] = await Promise.all([
+        const [statsResult, usersResult, disputesResult, skillsResult, waitlistResult] = await Promise.all([
           apiGet<{ stats: AdminStatistics }>("/admin/stats"),
           apiGet<{ users: { _id: string; name: string; email: string; college?: string; location?: string; walletBalance: number; isActive: boolean }[] }>("/admin/users?limit=100"),
           apiGet<{ disputes: { _id: string; reason: string; status: string; createdAt: string }[] }>("/admin/disputes?limit=100"),
           apiGet<{ skills: ApiSkill[] }>("/skills?type=offer&limit=100"),
+          apiGet<{ entries: AdminWaitlistRow[] }>("/admin/waitlist?limit=100"),
         ]);
         if (!active) return;
         setStats(statsResult.stats);
         setUsers(usersResult.users.map((item) => ({ id: item._id, name: item.name, email: item.email, campus: item.college || item.location || "Student community", credits: item.walletBalance, status: item.isActive ? "Active" : "Paused" })));
         setDisputes(disputesResult.disputes.map((item) => ({ id: item._id, title: item.reason, parties: "2 participants", created: new Date(item.createdAt).toLocaleDateString("en-US", { month: "short", day: "numeric" }), status: item.status === "resolved" ? "Resolved" : item.status === "dismissed" ? "Dismissed" : item.status === "under_review" ? "In progress" : "Needs review" })));
         setListings(skillsResult.skills);
+        setWaitlist(waitlistResult.entries);
       } catch (error) {
         if (active) toast.error(error instanceof Error ? error.message : "Could not load live admin data.");
       } finally {
@@ -732,6 +773,16 @@ function LiveAdminDashboard() {
     }
   }
 
+  async function updateWaitlist(entry: AdminWaitlistRow, status: AdminWaitlistRow["status"]) {
+    try {
+      await apiPatch(`/admin/waitlist/${encodeURIComponent(entry.id)}`, { status });
+      setWaitlist((current) => current.map((item) => item.id === entry.id ? { ...item, status } : item));
+      toast.success(`${entry.email} is marked ${status}.`);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Could not update this waitlist entry.");
+    }
+  }
+
   return <div className="page-stack">
     <div className="admin-demo-banner"><Shield size={16} /><span><b>Live admin workspace.</b> User, dispute, listing, and platform data come from the API.</span></div>
     <PageTitle eyebrow="A HEALTHY COMMUNITY, BY DESIGN" title="Community overview" description="Moderate members and listings, and help resolve disputes." action={<span className="live-tag"><i /> LIVE API DATA</span>} />
@@ -752,6 +803,10 @@ function LiveAdminDashboard() {
     <section className="panel admin-table-panel">
       <div className="panel-heading"><div><span className="eyebrow">FAIRNESS IS PART OF THE DEAL</span><h2>Community disputes</h2></div><span className="live-tag"><i /> {disputes.length} CASES</span></div>
       {disputes.length ? disputes.map((dispute) => <div className="dispute-row" key={dispute.id}><span className="dispute-case">{dispute.id.slice(-8)}</span><div><b>{dispute.title}</b><small>{dispute.parties} · Reported {dispute.created}</small></div><span className={`status-tag ${dispute.status === "Resolved" || dispute.status === "Dismissed" ? "status-done" : "status-upcoming"}`}>{dispute.status}</span><button className="table-action" disabled={dispute.status === "Resolved" || dispute.status === "Dismissed"} onClick={() => void resolveDispute(dispute)}>{dispute.status === "Resolved" ? "Resolved" : dispute.status === "Dismissed" ? "Dismissed" : "Resolve"}</button></div>) : <p className="admin-clear">{loading ? "Loading disputes…" : <><Check size={15} /> No open disputes. The community is in good hands.</>}</p>}
+    </section>
+    <section className="panel admin-table-panel">
+      <div className="panel-heading"><div><span className="eyebrow">NEXT UP FOR THE COMMUNITY</span><h2>Waitlist</h2></div><span className="live-tag"><i /> {waitlist.length} ENTRIES</span></div>
+      {waitlist.length ? waitlist.map((entry) => <div className="dispute-row" key={entry.id}><span className="dispute-case">{entry.status.toUpperCase()}</span><div><b>{entry.name || entry.email}</b><small>{entry.name ? `${entry.email} · ` : ""}{new Date(entry.createdAt).toLocaleDateString("en-US", { month: "short", day: "numeric" })}{entry.interests.length ? ` · ${entry.interests.join(", ")}` : ""}</small></div><select aria-label={`Waitlist status for ${entry.email}`} value={entry.status} onChange={(event) => void updateWaitlist(entry, event.target.value as AdminWaitlistRow["status"])}><option value="pending">Pending</option><option value="invited">Invited</option><option value="joined">Joined</option></select></div>) : <p className="admin-clear">{loading ? "Loading waitlist…" : "No waitlist entries yet."}</p>}
     </section>
   </div>;
 }

@@ -1,6 +1,7 @@
 import dotenv from "dotenv";
+import path from "node:path";
 
-dotenv.config();
+dotenv.config({ path: path.resolve(__dirname, "../../.env") });
 
 const defaults = {
   NODE_ENV: "development",
@@ -14,7 +15,8 @@ const defaults = {
 export const env = {
   nodeEnv: process.env.NODE_ENV ?? defaults.NODE_ENV,
   port: Number(process.env.PORT ?? defaults.PORT),
-  mongoUri: process.env.MONGODB_URI ?? "mongodb://127.0.0.1:27017/skillbridge",
+  supabaseUrl: process.env.SUPABASE_URL ?? "",
+  supabaseServiceRoleKey: process.env.SUPABASE_SERVICE_ROLE_KEY ?? "",
   jwtSecret: process.env.JWT_SECRET ?? "",
   jwtExpiresIn: process.env.JWT_EXPIRES_IN ?? defaults.JWT_EXPIRES_IN,
   clientOrigin: process.env.CLIENT_ORIGIN ?? defaults.CLIENT_ORIGIN,
@@ -34,5 +36,23 @@ export function validateEnvironment(): void {
   }
   if (env.jwtSecret.length < (env.nodeEnv === "production" ? 32 : 16)) {
     throw new Error(`JWT_SECRET must be at least ${env.nodeEnv === "production" ? 32 : 16} characters`);
+  }
+  if (!env.supabaseUrl || !URL.canParse(env.supabaseUrl) || !env.supabaseUrl.startsWith("https://")) {
+    throw new Error("SUPABASE_URL must be a valid HTTPS Supabase project URL");
+  }
+  const serviceKey = env.supabaseServiceRoleKey;
+  if (!serviceKey || serviceKey.startsWith("sb_publishable_")) {
+    throw new Error("SUPABASE_SERVICE_ROLE_KEY must be configured on the backend; a publishable key cannot be used");
+  }
+  if (serviceKey.startsWith("eyJ")) {
+    try {
+      const claims = JSON.parse(Buffer.from(serviceKey.split(".")[1] ?? "", "base64url").toString("utf8")) as { role?: string };
+      if (claims.role !== "service_role") throw new Error("SUPABASE_SERVICE_ROLE_KEY must contain a service-role key");
+    } catch (error) {
+      if (error instanceof SyntaxError) throw new Error("SUPABASE_SERVICE_ROLE_KEY must be a valid service-role key");
+      throw error;
+    }
+  } else if (!serviceKey.startsWith("sb_secret_")) {
+    throw new Error("SUPABASE_SERVICE_ROLE_KEY must contain a Supabase service-role/secret key");
   }
 }
